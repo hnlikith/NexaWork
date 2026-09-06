@@ -1,0 +1,19 @@
+/**
+ * Copyright (c) 2026 NexaWork
+ * 
+ * This source code is licensed under the AGPL-3.0 license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+import { cn } from "@/lib/utils"
+
+function Skeleton({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="skeleton"
+      className={cn("animate-pulse rounded-md bg-muted", className)}
+      {...props}
+    />
+  )
+}
+
+export { Skeleton }

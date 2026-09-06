@@ -1,0 +1,47 @@
+-- ─── Workspace Sharing & UI Enhancements (Consolidated) ───────────────────────
+-- This migration combines workspace_shares and UI column updates.
+
+-- 1. Add cover image support to documents
+ALTER TABLE workspace_documents ADD COLUMN IF NOT EXISTS cover_image TEXT DEFAULT NULL;
+
+-- 2. Create Workspace Shares table for robust permission management
+-- This replaces the JSONB 'shared_with' field for better relational queries.
+CREATE TABLE IF NOT EXISTS workspace_shares (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  item_id        UUID NOT NULL, -- References doc, sheet, presentation, or note
+  item_type      TEXT NOT NULL CHECK (item_type IN ('document', 'spreadsheet', 'presentation', 'note')),
+  item_title     TEXT, -- Cache title for quicker listing without joins
+  owner_id       UUID REFERENCES employees(id) ON DELETE CASCADE,
+  user_id        UUID NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  access_level   TEXT NOT NULL DEFAULT 'read' CHECK (access_level IN ('read', 'edit', 'comment')),
+  message        TEXT DEFAULT '',
+  created_at     TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(item_id, user_id)
+);
+
+-- 3. Indexes for sharing performance
+CREATE INDEX IF NOT EXISTS idx_workspace_shares_item ON workspace_shares(item_id, item_type);
+CREATE INDEX IF NOT EXISTS idx_workspace_shares_user ON workspace_shares(user_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_shares_owner ON workspace_shares(owner_id);
+
+-- 4. RLS Policies for sharing
+ALTER TABLE workspace_shares ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "workspace_shares_all" ON workspace_shares FOR ALL USING (true) WITH CHECK (true);
+
+-- 5. View for easier sharing management (joins employee details)
+CREATE OR REPLACE VIEW workspace_shared_users AS
+SELECT 
+  ws.id as share_id,
+  ws.item_id,
+  ws.item_type,
+  ws.item_title,
+  ws.access_level,
+  ws.message,
+  ws.created_at as shared_at,
+  e.id as user_id,
+  e.name,
+  e.email,
+  e.role,
+  e.employee_id
+FROM workspace_shares ws
+JOIN employees e ON ws.user_id = e.id;
