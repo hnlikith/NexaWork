@@ -59,6 +59,17 @@ Each of the areas below is backed by dedicated routes, API endpoints, and databa
 - SMTP email delivery via Nodemailer, with an in-app SMTP connection test
 - SAML SSO support
 
+### AI-Assisted Communication
+- Automatic email classification into a fixed category set, with a 1–5 priority score and sentiment label
+- One-sentence email summaries and multi-message thread summarisation
+- Three context-specific reply suggestions per message
+- Tone improvement and length-reduction rewriting for outbound mail, returned as formatted HTML
+- Subject-line suggestion from message body
+- An executive digest across unread priority mail
+- An AI assistant inside the document and spreadsheet workspace (rewrite, summarise, expand, tone shift, formula explanation, data analysis, chart suggestion, natural-language query)
+- Meeting-transcript analysis producing structured minutes: summary, key topics, decisions, and assignable action items
+- Cached AI results with a time-to-live, so repeat views do not re-run inference
+
 ### Administration & Governance
 - A module-level permission matrix with per-employee overrides
 - Centralised audit logging of state-changing API calls
@@ -66,6 +77,61 @@ Each of the areas below is backed by dedicated routes, API endpoints, and databa
 - Analytics and reporting surfaces
 
 ---
+
+## AI & Intelligent Email
+
+NexaWork embeds AI directly into the internal mail workflow rather than exposing a general-purpose chatbot. The model is called for specific, bounded tasks — classify this message, summarise this thread, tighten this draft — and the results are written back into the application's own data model, so they behave like ordinary message metadata that the UI can sort and filter on.
+
+### Pipeline
+
+```
+Zoho Mail API
+      │  messages synced into the NexaWork mail layer
+      ▼
+/api/mail/ai/classify     ← one endpoint, task selected by `type`
+      │
+      ├── cache lookup: mail_ai_cache (by message id, unexpired)  ──► hit: return, no inference
+      │
+      ▼  miss
+callGemma()  →  provider chain (see below)
+      │
+      ▼  structured result (JSON / delimited blocks), parsed with fallbacks
+      ├── mail_ai_cache        upsert, 1-hour TTL
+      └── mail_messages        ai_category · ai_priority · ai_sentiment · ai_summary · ai_processed_at
+      │
+      ▼
+Inbox and compose UI — category chips, priority ordering, summaries, reply chips, AI rewrite buttons
+```
+
+### Implemented operations
+
+| Task | What it produces |
+|---|---|
+| `classify` | Category (`URGENT`, `WORK`, `FINANCE`, `FOLLOW_UP`, `GENERAL`), priority `1`–`5`, sentiment (`POSITIVE`/`NEGATIVE`/`NEUTRAL`), one-sentence summary |
+| `reply_suggest` | Three short replies, deliberately varied (acknowledge / request detail / propose next step) |
+| `summarize_thread` | 2–3 sentence summary across up to 5 messages, covering topic, decisions, pending actions |
+| `digest` | A 3-sentence executive digest over up to 10 unread priority emails |
+| `improve_tone` | Rewritten subject + inline-CSS HTML body, meaning preserved |
+| `shorten` | Same, reduced 30–50% by cutting filler rather than dropping facts |
+| `suggest_subject` | A single subject line of at most 60 characters |
+
+Beyond mail, the same inference layer backs an AI sidebar in the document and spreadsheet workspace (`/api/workspace/ai`) covering summarise, rewrite, expand, formality shift, formula explanation and suggestion, data cleaning, chart suggestion, and natural-language queries. Meeting minutes are produced by a separate route that sends a transcript to the Anthropic Claude API and returns structured JSON — summary, key topics, decisions, and action items with assignee and due date.
+
+### Inference architecture
+
+The shared entry point is `callGemma()` in `src/lib/zoho-mail.ts`. It resolves a provider in this order:
+
+1. **Local fast path (opt-in).** When a caller passes `preferLocal` and a local endpoint is configured, the Ollama-compatible endpoint is tried first under a 25-second timeout — this skips the remote chain entirely for latency-sensitive calls.
+2. **OpenRouter model chain.** If an OpenRouter key is configured, the request walks a chain of 18 free-tier models arranged in four capability tiers, strongest first. Models are tried **one at a time, in order — never in parallel**: each gets a hard 10-second timeout, and a `429`, non-OK status, timeout, or empty completion moves immediately to the next. The first usable completion wins and the chain stops. The chain is overridable per call.
+3. **Local fallback.** If the chain is exhausted or no OpenRouter key is set, the request falls back to the Ollama-compatible endpoint.
+
+If nothing is reachable the helper returns an empty string, and callers degrade rather than fail: classification falls back to a neutral `GENERAL`/priority-3 record, reply suggestions fall back to three generic professional replies, and the rewrite endpoints return a `503` telling the user to retry.
+
+Supporting details:
+
+- **Structured outputs.** A shared system prompt pins the model to English and to the exact requested shape. Classification and reply generation request strict JSON and are parsed by extracting the first JSON object or array, tolerating models that wrap output in prose. The rewrite tasks use `===SUBJECT===` / `===BODY===` / `===END===` delimiters instead, with three layered fallbacks — JSON parse, raw-HTML detection, then plain-text-to-HTML wrapping — because smaller models frequently ignore delimiters.
+- **Caching.** `mail_ai_cache` is keyed uniquely on the Zoho message id with a one-hour expiry; lookups filter on `expires_at`. Classification results are additionally denormalised onto `mail_messages` so list views can sort and filter without touching the cache table. Responses carry a `source` field (`cache` or `gemma`), making cache behaviour observable from the client.
+- **Provider-agnostic configuration.** No provider is hardcoded as mandatory. The deployment supplies whichever endpoints and keys it wants through environment variables; with none configured, AI features degrade to their fallbacks and the rest of the application is unaffected.
 
 ## Technology Stack
 
@@ -85,6 +151,7 @@ Each of the areas below is backed by dedicated routes, API endpoints, and databa
 | Vision | MediaPipe Tasks Vision, `face-api` (attendance verification helpers) |
 | Email | Nodemailer, Zoho Mail API |
 | SSO | SAML via `xml-crypto` |
+| AI / LLM | OpenRouter multi-model inference with an Ollama-compatible local endpoint as fallback; Anthropic Claude API for meeting-transcript analysis |
 
 ---
 
@@ -206,7 +273,7 @@ Create a local environment file from the template and fill in your own values:
 cp .env.example .env.local
 ```
 
-`.env.example` documents every variable the application reads, including Supabase URL and keys, application base URL, and optional integration credentials (Google, Zoho, SMTP, Power BI, Firebase). **All values in the template are placeholders** — you must supply your own. `.env.local` is gitignored and must never be committed.
+`.env.example` documents every variable the application reads, including Supabase URL and keys, application base URL, and optional integration credentials (Google, Zoho, SMTP, Power BI, Firebase, and AI inference). The AI variables are optional — with none configured, the AI features fall back to deterministic defaults and the rest of the application runs normally. **All values in the template are placeholders** — you must supply your own. `.env.local` is gitignored and must never be committed.
 
 Apply the SQL migrations in `src/supabase/migrations/` and `supabase/migrations/` to your Supabase project in filename order.
 
@@ -237,6 +304,7 @@ Aspects of this project most relevant to technical review:
 - **Cross-cutting concerns handled centrally** — auditing implemented once in middleware with explicit skip rules, instead of being scattered across individual handlers.
 - **Document generation pipeline** — server-side PDF rendering for onboarding paperwork and invoices, including the serverless packaging work needed to make headless Chromium function in that environment.
 - **Third-party integration** — OAuth-based Zoho Mail/Calendar integration, Google service-account calendar access, SAML SSO, and SMTP delivery with in-app diagnostics.
+- **Resilient AI inference** — rather than calling a single model and failing when it is unavailable, inference walks an ordered multi-model chain with a per-model timeout and immediate skip on rate-limiting, backed by a local endpoint and by deterministic non-AI fallbacks at every call site. Results are requested as structured output, parsed defensively for models that ignore the format, and cached with a TTL so repeat views cost nothing.
 - **Type safety throughout** — end-to-end TypeScript with Zod validation at input boundaries.
 
 Developed and reconstructed as an independent NexaWork application.
