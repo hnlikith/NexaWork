@@ -346,7 +346,7 @@ export default function AdminOverview() {
       // 2  pending leave requests
       supabase.from("leave_requests").select("id", { count: "exact", head: true }).eq("status", "pending"),
       // 3  active projects
-      supabase.from("projects").select("id", { count: "exact", head: true }).in("status", ["active", "in_progress"]),
+      supabase.from("projects").select("id", { count: "exact", head: true }).eq("is_active", true),
       // 4  open support tickets
       supabase.from("support_tickets").select("id", { count: "exact", head: true }).in("status", ["open", "in_progress"]),
       // 5  pending priority payouts
@@ -358,19 +358,19 @@ export default function AdminOverview() {
       // 8  pending reimbursements (rows for amount sum)
       supabase.from("reimbursements").select("id, amount").eq("status", "pending"),
       // 9  invoices issued in range
-      supabase.from("invoices").select("id, total_amount, status, issued_date").gte("issued_date", fromDate).lte("issued_date", toDate),
+      supabase.from("invoices").select("id, total, status, issued_date").gte("issued_date", fromDate).lte("issued_date", toDate),
       // 10 audit feed (latest 8 entries)
       supabase.from("audit_logs").select("id, action, target_type, user_id, created_at, metadata").order("created_at", { ascending: false }).limit(8),
       // 11 upcoming meetings (next 7 days)
       supabase.from("meetings").select("id, title, scheduled_at, status").gte("scheduled_at", new Date().toISOString()).lte("scheduled_at", sevenDaysOut).order("scheduled_at", { ascending: true }).limit(6),
       // 12 employees for birthdays/anniversaries (we filter client-side because Supabase can't easily match MM-DD)
-      supabase.from("employees").select("id, name, dob, joining_date").eq("status", "active"),
+      supabase.from("employees").select("id, name, joining_date").eq("status", "active"),
       // 13 KPI top performers — try kpi_scores, fall back below
       supabase.from("kpi_scores").select("employee_id, final_score, month, year, employees(name, department)").order("final_score", { ascending: false }).limit(5),
       // 14 dept breakdown — full active employee list grouped by department
       supabase.from("employees").select("department").eq("status", "active"),
       // 15 sales trend — paid invoices over the last 12 weeks (FY-aware via date range from)
-      supabase.from("invoices").select("issued_date, total_amount, status").gte("issued_date", dayjs().subtract(12, "week").format("YYYY-MM-DD")),
+      supabase.from("invoices").select("issued_date, total, status").gte("issued_date", dayjs().subtract(12, "week").format("YYYY-MM-DD")),
     ]);
 
     const safe = (i: number) => {
@@ -391,9 +391,9 @@ export default function AdminOverview() {
     const reimbAmt   = reimbRows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
 
     // Aggregate invoices
-    const invRows = rows<{ id: string; total_amount: number; status: string; issued_date: string }>(9);
-    const invTotal       = invRows.reduce((s, r) => s + (Number(r.total_amount) || 0), 0);
-    const invPaid        = invRows.filter(r => r.status === "paid").reduce((s, r) => s + (Number(r.total_amount) || 0), 0);
+    const invRows = rows<{ id: string; total: number; status: string; issued_date: string }>(9);
+    const invTotal       = invRows.reduce((s, r) => s + (Number(r.total) || 0), 0);
+    const invPaid        = invRows.filter(r => r.status === "paid").reduce((s, r) => s + (Number(r.total) || 0), 0);
     const invOutstanding = invTotal - invPaid;
 
     setSnapshot({
@@ -454,12 +454,12 @@ export default function AdminOverview() {
     setDeptSlices(slices);
 
     // Sales trend — group paid invoices by ISO week
-    const salesRows = rows<{ issued_date: string; total_amount: number; status: string }>(15);
+    const salesRows = rows<{ issued_date: string; total: number; status: string }>(15);
     const weekMap = new Map<string, number>();
     for (const r of salesRows) {
       if (r.status !== "paid") continue;
       const week = dayjs(r.issued_date).startOf("week").format("MMM DD");
-      weekMap.set(week, (weekMap.get(week) ?? 0) + (Number(r.total_amount) || 0));
+      weekMap.set(week, (weekMap.get(week) ?? 0) + (Number(r.total) || 0));
     }
     const trend = Array.from(weekMap.entries()).map(([period, amount]) => ({ period, amount })).slice(-12);
     setSalesTrend(trend);
